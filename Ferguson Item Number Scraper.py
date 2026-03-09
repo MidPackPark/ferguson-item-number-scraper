@@ -30,8 +30,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 # Paths and workbook settings
 # -----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_FILE = os.path.join(BASE_DIR, "Ferguson Item Scraper Template.xlsx")
-OUTPUT_FILE = os.path.join(BASE_DIR, "Ferguson Item Scraper Final.xlsx")
+INPUT_FILE = os.path.join(BASE_DIR, "Ferguson Item Number Scraper Template.xlsx")
+OUTPUT_FILE = os.path.join(BASE_DIR, "Ferguson Item Number Scraper Final.xlsx")
 PROFILE_DIR = os.path.join(BASE_DIR, "Ferguson Item Number Scraper Profile")
 
 SHEET_NAME = "Scraper Data"

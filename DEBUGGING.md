@@ -1,243 +1,197 @@
 # Debugging Guide
 
 ## Purpose
-This guide helps future agents and developers diagnose failures in Ferguson Item Number Scraper without repeating the full discovery process.
 
-## First Rule
-Always determine **which layer is failing** before changing code:
-1. Excel input/output
-2. authentication/session establishment
-3. search-page lookup
-4. item-number parsing
-5. runtime pricing context extraction
-6. pricing endpoint call
+This document records the current known failure points, the active debugging strategy, and the lessons learned while stabilizing the Ferguson Item Number Scraper.
 
-Do not assume the visible symptom points to the real cause.
+## Current Debug Output Behavior
 
-## Fast Triage Checklist
-When the script fails, answer these first:
-- Did Chrome open and reuse the correct profile?
-- Was Ferguson truly authenticated?
-- Did the script search for the expected sanitized model number?
-- Did the returned search page contain the model and item mapping?
-- Was the runtime pricing context present?
-- Did the pricing endpoint return the expected structure?
-- Did Excel writeback succeed?
+The current baseline writes debug artifacts into a local folder named:
 
-## Known Good Regression Example
-Use this whenever possible for quick validation:
-- **Model number:** `MN-ZMBBU0904`
-- **Expected Ferguson item number:** `1115021`
-- **Expected price:** `$14.510`
+```text
+debugging
+```
 
-If this known case fails, the problem is likely systemic rather than row-specific.
+### Current debug file types
+- `debug_*.json`
+- `debug_*.html`
+- `debug_*.png`
 
-## Layer-by-Layer Troubleshooting
+### What gets saved
+- startup authentication state
+- manual login prompt page
+- manual login post-check auth state
+- runtime pricing context
+- limited search-page debug artifacts for misses
 
-### 1. Excel Layer Problems
-#### Symptoms
+### Current cleanup behavior
+At startup, the script clears the **contents** of the `debugging` folder but does **not** delete the folder itself.
+
+This was adopted because deleting the whole folder caused Windows / OneDrive permission errors when:
+- a debug file was open
+- File Explorer was pointed at the folder
+- OneDrive was syncing the folder
+- Windows held a file/folder handle briefly after a prior run
+
+## Most Common Failure Layers
+
+### 1. Workbook / sheet contract
+Symptoms:
 - workbook not found
-- worksheet not found
-- no rows processed
-- values not written back
-- output workbook missing
+- worksheet key errors
+- wrong sheet name
+- values not read or written where expected
 
-#### Checks
-- verify the script folder is correct
-- verify `Ferguson Item Scraper Template.xlsx` exists beside the script
-- verify the worksheet is `Scraper data`
-- verify the configured columns match the workbook layout
-- verify the output workbook path is writable
+Current baseline:
+- workbook: `Ferguson Item Number Scraper Template.xlsx`
+- worksheet: `Scraper Data`
 
-#### Likely causes
-- workbook renamed without updating code
-- worksheet renamed without updating code
-- column mapping drift
-- workbook open/locked by another process
+### 2. Authentication / session
+Symptoms:
+- browser opens but is still guest
+- page looks partially logged in but pricing/search acts like guest
+- manual login prompt repeats
+- pricing context missing
 
----
+Checks:
+- verify login on the actual Ferguson site
+- confirm authenticated state by page data, not URL alone
+- verify runtime auth JSON if saved
 
-### 2. Authentication Problems
-#### Symptoms
-- Ferguson opens but is not actually logged in
-- homepage loads as guest
-- script appears to proceed but later calls fail or behave like guest traffic
-- login works manually in Chrome but not in automated form-submission attempts
+### 3. Search request
+Symptoms:
+- no item matches
+- obvious valid items come back as not found
+- search page content does not match browser expectation
 
-#### Checks
-- verify the correct dedicated profile folder is being used
-- inspect auth-state output if available
-- confirm Ferguson is actually logged in inside the opened browser window
-- verify the site is not still showing `LOGIN` / `CREATE ACCOUNT`
-- verify the script is not using a fresh empty profile unintentionally
+Checks:
+- inspect saved search-page HTML
+- compare browser-rendered page to requests-returned page
+- confirm sanitized search term
 
-#### What we learned historically
-- URL change alone is **not** reliable proof of login
-- earlier form-based login attempts could look partially successful while still ending in guest state
-- manual login with a persistent profile worked reliably
+### 4. HTML parsing
+Symptoms:
+- Ferguson search page clearly shows the item
+- script still reports not found
 
-#### Recommended response
-For production stability, prefer the manual-login profile baseline unless explicitly testing a new login method.
+Checks:
+- verify `sanitize_model_number()` exists and is being called
+- confirm `pick_item_from_text()` still includes:
+  - strong model-linked patterns
+  - nearby-window search
+  - generic fallback patterns
 
----
+### 5. Pricing / API
+Symptoms:
+- item number found
+- price missing or wrong
+- runtime pricing context incomplete
 
-### 3. Search Request Problems
-#### Symptoms
-- script says it searched but nothing is found
-- known good models come back blank
-- requests complete without errors but no item is extracted
+Checks:
+- inspect `debug_runtime_pricing_context.json`
+- verify `branch_id`, `warehouse_location_id`, and `customer_main_account_number`
+- confirm the item number is passed into pricing lookup
 
-#### Checks
-- inspect the exact search URL used
-- verify the sanitized model number
-- verify the raw model number if fallback search is used
-- save and inspect the returned search-page HTML
-- search inside the HTML for the model number and `Item #`
+### 6. Debugging layer itself
+Symptoms:
+- script crashes before main work
+- debug cleanup permission errors
+- helper function `NameError`
 
-#### Important historical discovery
-The autosuggest endpoint was not the right authoritative source for item-number mapping. The real search results page was the successful path.
+Checks:
+- confirm `reset_debug_dir()` clears contents rather than deleting the entire folder
+- confirm required top-level helpers still exist
 
----
+## Required Top-Level Helper Functions
 
-### 4. Parsing Problems
-#### Symptoms
-- search page loads correctly but item number is blank
-- parsing works for some items but not others
-- item extracted appears wrong or inconsistent
+The current code depends on these helpers existing at top level:
 
-#### Checks
-Search the returned HTML for these patterns near the model number:
-- `Mfr. Part #`
-- `Item #`
-- `preselectedVariant=`
-- `data-pid=`
-- product URLs ending in `/1234567.html`
+- `reset_debug_dir()`
+- `save_json_debug()`
+- `save_text_debug()`
+- `save_page_debug()`
+- `wait_for_dom_ready()`
+- `dismiss_cookie_banner()`
+- `sanitize_model_number()`
 
-#### Likely causes
-- Ferguson changed markup
-- parser is too narrow
-- parser is too broad and catches the wrong value
-- input model contains stray punctuation or formatting characters
+If one of these is removed, renamed, or accidentally indented inside another function, the script may fail with `NameError`.
 
-#### Important historical discovery
-A captured search URL and page included a trailing curly apostrophe in the model string. Sanitization was required.
+## Known Historical Failures and Fixes
 
----
+### Failure: browser opened and immediately closed
+Cause:
+- helper function `wait_for_dom_ready()` was missing
 
-### 5. Pricing Context Problems
-#### Symptoms
-- item number is found but price is blank
-- pricing endpoint call fails or returns no matching product pricing
+Fix:
+- restore the helper at top level above browser/session helpers
 
-#### Checks
-Verify the script has all required runtime context:
-- `warehouse_location_id`
-- `branch_id`
-- `customer_main_account_number`
+### Failure: browser opened and then failed during auth
+Cause:
+- helper function `dismiss_cookie_banner()` was missing
 
-#### Likely causes
-- auth state changed or was not fully loaded
-- parser failed to pull one of the context values
-- page markup changed
-- account/session is different from the one used during discovery
+Fix:
+- restore the helper at top level
 
----
+### Failure: every row failed after successful login
+Cause:
+- helper function `sanitize_model_number()` was missing
 
-### 6. Pricing Endpoint Problems
-#### Symptoms
-- item number is known but price API returns nothing useful
-- JSON structure changed
-- returned pricing does not include the expected item id
+Fix:
+- restore the helper and keep it in the utility/helper section
 
-#### Known endpoint
-`Search-GetTilePricing`
+### Failure: search pages showed valid items but parser returned not found
+Cause:
+- generic parser fallback block had been removed from `pick_item_from_text()`
 
-#### Required parameters
-- `productIDs`
-- `shipWhseId`
-- `branchId`
-- `customerId`
+Fix:
+- restore the generic fallback block
 
-#### Checks
-- verify item number is correct
-- verify request parameters match the authenticated account/session context
-- verify the referer is a valid Ferguson search URL for that item/model lookup
-- inspect the JSON response shape
+### Failure: debug folder cleanup crashed the script
+Cause:
+- script tried to delete the whole `debugging` folder with `shutil.rmtree()`
 
-#### Historical discovery
-Pricing was solved once the item number and account context were known. The missing link was item-number extraction from the search-results page.
+Fix:
+- keep the folder, remove contents safely, warn on locked files instead of crashing
 
----
+## Current Recommended Debug Process
 
-## Historical Login Experiments and What Was Learned
+When a new issue appears, identify the layer first:
 
-### Automated Selenium login
-#### Result
-Failed as a dependable production method.
+1. workbook / sheet
+2. authentication / session
+3. search request
+4. HTML parsing
+5. pricing / API
+6. result write-back
 
-#### Symptoms seen
-- email visually entered correctly
-- site moved forward visually but still ended in guest state
-- false positives when using URL changes as the success check
-- misleading UI states like account-not-found behavior or guest homepage redirects
+Then gather only the minimum useful evidence:
+- exact console traceback
+- current `.py` file
+- relevant debug HTML/JSON files
+- screenshot only if it adds something not visible in text
 
-#### Lesson
-Visual progression is not enough. Authentication must be validated through page state.
+## Current Search-Parsing Notes
 
-### Hidden-character / spacing theory
-#### Result
-Plausible early on, but not the root cause of the login failure.
+The current parser depends on model sanitization before searching and matching.
 
-#### Lesson
-Input normalization matters, but the deeper problem was the Ferguson/Salesforce handoff under automation.
+`sanitize_model_number()` currently:
+- unescapes HTML-style text
+- removes curly quotes
+- removes straight quotes
+- normalizes non-breaking spaces
+- collapses repeated whitespace
+- uppercases the final value
 
-### Stealth and anti-detection tricks
-#### Result
-Did not produce a dependable login solution.
+This preprocessing remains important because hidden punctuation and spacing issues can break valid Ferguson searches.
 
-#### Lesson
-Could add complexity without solving the underlying handoff/session problem.
+## Current Miss-Artifact Behavior
 
-### Manual login with persistent profile
-#### Result
-Worked and became the current baseline.
+When an item is not found, the script currently saves only a small number of miss pages for review. This keeps the `debugging` folder useful without becoming too large during a long run.
 
-#### Lesson
-Use the real browser session for stability, then shift the data lookup work to HTTP requests.
+## What Must Remain Stable
 
-## Recommended Debug Artifacts to Keep
-For misses or major failures, it is useful to save:
-- search-page HTML for the model
-- final search URL
-- auth-state snapshot
-- runtime pricing context snapshot
-- screenshot only when the browser state is relevant
-
-Avoid generating heavy debug output for every successful row.
-
-## Safe Debugging Workflow
-1. Reproduce the failure on one or two rows only.
-2. Use a known-good regression item first.
-3. Save the exact returned HTML or JSON.
-4. Confirm which layer failed.
-5. Make one small code change.
-6. Re-test the same known example.
-7. Only then broaden the run.
-
-## When Exploring New Login Automation
-If future work resumes automated login experimentation, always record:
-- method tried
-- why it was tried
-- exact observed result
-- whether the site was truly authenticated afterward
-- whether item lookup still worked afterward
-- whether the method looked promising or should be abandoned
-
-## Good Debugging Questions for Future Agents
-- Is the script actually authenticated, or only appearing to progress?
-- Is the model string clean before search?
-- Is the search HTML the real issue rather than the request itself?
-- Did Ferguson change HTML markup or endpoint shape?
-- Did the workbook contract drift from the production code?
-- Is this a login problem, a parsing problem, or a pricing-context problem?
-
+- worksheet name `Scraper Data`
+- dedicated profile login baseline
+- authenticated search-page lookup flow
+- separation between item lookup and pricing lookup
+- lightweight but useful debug capture

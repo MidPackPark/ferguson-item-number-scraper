@@ -22,6 +22,7 @@ from urllib.parse import quote_plus
 
 import openpyxl
 import requests
+import shutil
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
@@ -33,6 +34,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_FILE = os.path.join(BASE_DIR, "Ferguson Item Number Scraper Template.xlsx")
 OUTPUT_FILE = os.path.join(BASE_DIR, "Ferguson Item Number Scraper Final.xlsx")
 PROFILE_DIR = os.path.join(BASE_DIR, "Ferguson Item Number Scraper Profile")
+DEBUG_DIR = os.path.join(BASE_DIR, "debugging")
 
 SHEET_NAME = "Scraper Data"
 MODEL_COL = 1
@@ -86,25 +88,46 @@ return {
 # -----------------------------------------------------------------------------
 # Utility helpers
 # -----------------------------------------------------------------------------
+def reset_debug_dir():
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+
+    for name in os.listdir(DEBUG_DIR):
+        path = os.path.join(DEBUG_DIR, name)
+        try:
+            if os.path.isfile(path) or os.path.islink(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        except PermissionError:
+            print(f"WARNING: Could not delete debug file or folder in use: {path}")
+        except Exception as e:
+            print(f"WARNING: Could not delete debug file or folder: {path} ({e})")
+
+
 def save_json_debug(label, data):
-    path = os.path.join(BASE_DIR, f"debug_{label}.json")
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
+    path = os.path.join(DEBUG_DIR, f"debug_{safe_label}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     return path
 
 
 def save_text_debug(label, content, ext="html"):
+    os.makedirs(DEBUG_DIR, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
-    path = os.path.join(BASE_DIR, f"debug_{safe_label}.{ext}")
+    safe_ext = re.sub(r"[^A-Za-z0-9]+", "", str(ext or "txt")) or "txt"
+    path = os.path.join(DEBUG_DIR, f"debug_{safe_label}.{safe_ext}")
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path
 
 
 def save_page_debug(driver, label):
+    os.makedirs(DEBUG_DIR, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
-    screenshot_path = os.path.join(BASE_DIR, f"debug_{safe_label}.png")
-    html_path = os.path.join(BASE_DIR, f"debug_{safe_label}.html")
+    screenshot_path = os.path.join(DEBUG_DIR, f"debug_{safe_label}.png")
+    html_path = os.path.join(DEBUG_DIR, f"debug_{safe_label}.html")
 
     try:
         driver.save_screenshot(screenshot_path)
@@ -134,24 +157,34 @@ def dismiss_cookie_banner(driver):
         )
         if button:
             driver.execute_script("arguments[0].click();", button)
-            time.sleep(0.3)
+            time.sleep(0.5)
     except Exception:
         pass
 
 
 def sanitize_model_number(value):
-    text = unescape(str(value or ""))
-    text = (
-        text.replace("\u2018", "")
-        .replace("\u2019", "")
-        .replace("\u201c", "")
-        .replace("\u201d", "")
-        .replace("'", "")
-        .replace('"', "")
-        .replace("\u00a0", " ")
-    )
+    if value is None:
+        return ""
+
+    text = str(value)
+
+    replacements = {
+        "\u2018": "",
+        "\u2019": "",
+        "\u201c": "",
+        "\u201d": "",
+        "'": "",
+        '"': "",
+        "\u00a0": " ",
+        "–": "-",
+        "—": "-",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
     text = re.sub(r"\s+", " ", text).strip()
-    return text.upper()
+    return text
 
 
 # -----------------------------------------------------------------------------
@@ -268,6 +301,7 @@ def build_authenticated_session(driver):
     return session
 
 
+
 # -----------------------------------------------------------------------------
 # Runtime context and lookup helpers
 # -----------------------------------------------------------------------------
@@ -346,6 +380,20 @@ def pick_item_from_text(text, model_number):
             if nearby:
                 return nearby.group(1)
 
+    # Generic fallbacks.
+    for pattern in [
+        r"Item\s*(?:&#35;|#)\s*(\d{5,10})",
+        r"preselectedVariant=(\d{5,10})",
+        r'id=["\']p-(\d{5,10})["\']',
+        r'/product/[^"\']*/(\d{5,10})\.html',
+        r'"productId"\s*:\s*"?(\d{5,10})"?',
+        r'"productID"\s*:\s*"?(\d{5,10})"?',
+        r'"sku"\s*:\s*"?(\d{5,10})"?',
+    ]:
+        match = re.search(pattern, text_unescaped, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1)
+
     return None
 
 
@@ -411,6 +459,7 @@ def lookup_item_and_price(session, driver, model_number, runtime_context):
 # Main
 # -----------------------------------------------------------------------------
 def main():
+    reset_debug_dir()
     print(f"Script folder: {BASE_DIR}")
     print(f"Dedicated Chrome profile: {PROFILE_DIR}")
 

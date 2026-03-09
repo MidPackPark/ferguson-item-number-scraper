@@ -1,207 +1,199 @@
 # Architecture
 
 ## Purpose
-This document explains the current technical design of Ferguson Item Number Scraper, identifies which layers are stable versus intentionally flexible, and records the discoveries that led to the working architecture.
 
-## Design Philosophy
-This project should be understood as a layered system rather than a single monolithic script. Future changes should preserve the validated lower-risk layers while allowing controlled experimentation in the problem areas, especially login automation.
+This document describes the current technical architecture of the Ferguson Item Number Scraper, the boundaries that should remain stable, and the parts of the system that may be redesigned in the future.
 
-## System Layers
+## System Design Philosophy
 
-### Layer 1: Excel Input/Output Layer
-This is the most protected layer.
+Treat this project as a layered system, not a single script.
 
-#### Responsibilities
+The most important rule is that the **item lookup and Excel pipeline must remain stable** unless a change is explicitly intended and revalidated. Authentication may evolve, but downstream behavior must continue to work.
+
+## Current Working Architecture
+
+### Layer 1: Excel Input / Output
+
+**Responsibilities**
 - locate the input workbook
-- open the target worksheet
-- read model numbers from the configured input column
-- write Ferguson item numbers to the configured output column
-- write prices to the configured price column
-- autosave progress periodically
-- save to a distinct output workbook by default
+- open worksheet `Scraper Data`
+- read manufacturer model numbers from column A
+- write Ferguson item numbers to column C
+- write pricing to column E
+- autosave progress during the run
+- save final output to a separate workbook
 
-#### Stability
-**Highly stable.** Avoid unnecessary changes here.
+**Current settings in code**
+- workbook: `Ferguson Item Number Scraper Template.xlsx`
+- sheet: `Scraper Data`
+- start row: `2`
 
-#### Why it matters
-This layer defines the interface between the scraper and the user's estimating workflow. Breaking this layer breaks the project’s business value immediately.
+**Stability**
+- highly stable
+- should not be changed casually
 
 ---
 
-### Layer 2: Lookup Workflow Layer
-This is the validated core lookup pipeline.
+### Layer 2: Authentication / Session Establishment
 
-#### Responsibilities
-- sanitize manufacturer model numbers
-- request the real Ferguson search results page
+**Current working baseline**
+- launch Chrome with dedicated profile folder `Ferguson Item Number Scraper Profile`
+- attempt to reuse existing authenticated Ferguson session
+- if session is not authenticated, prompt user for manual login
+- verify authentication from page-state signals
+- copy cookies from Selenium browser into a `requests.Session`
+
+**Important helper functions**
+- `wait_for_dom_ready()`
+- `dismiss_cookie_banner()`
+- `ensure_authenticated_session()`
+- `build_authenticated_session()`
+
+**Stability**
+- flexible
+- may be redesigned later
+- any redesign must revalidate downstream lookup and Excel output
+
+---
+
+### Layer 3: Search and Item Extraction
+
+**Responsibilities**
+- sanitize the manufacturer model number before searching
+- request the Ferguson search results page
 - parse the returned HTML for the Ferguson item number
-- use the matched item number to request pricing
 
-#### Stability
-**Mostly stable.** Changes should be small and regression-tested.
+**Current lookup strategy**
+1. sanitize model number
+2. search Ferguson using the sanitized model
+3. if needed, try the original raw model number
+4. parse the search results HTML for the Ferguson item number
 
-#### Key discovery
-The real search results page contained the item-number mapping directly, while the autosuggest endpoint did not provide a reliable authoritative mapping for the project’s needs.
+**Current parser behavior**
+- strong model-linked patterns first
+- nearby-window search around the matched model text
+- generic fallback patterns over the page HTML
+
+**Why the generic fallback remains**
+Recent debugging confirmed that some valid Ferguson result pages only resolved correctly when the generic fallback block was present. It is therefore part of the current stable baseline.
+
+**Important helper functions**
+- `sanitize_model_number()`
+- `search_page_request()`
+- `search_page_selenium()`
+- `pick_item_from_text()`
+
+**Stability**
+- mostly stable
+- changes should be small and tested on a sample batch first
 
 ---
 
-### Layer 3: Pricing Layer
-This layer is separate from lookup and should stay separate.
+### Layer 4: Pricing / API Layer
 
-#### Responsibilities
-- extract runtime pricing context from the logged-in Ferguson session
-- call `Search-GetTilePricing`
-- parse account-specific price output for the matched Ferguson item number
+**Responsibilities**
+- extract pricing context from the authenticated session/page
+- call Ferguson `Search-GetTilePricing`
+- parse and return the account-specific price
 
-#### Stability
-**Stable but dependent on external markup and endpoint behavior.**
-
-#### Key discovery
-Pricing requires:
+**Runtime pricing context currently required**
 - `productIDs`
 - `shipWhseId`
 - `branchId`
 - `customerId`
 
-These values are account-dependent and should be extracted at runtime instead of hardcoded.
+In the current script, these values are derived from:
+- `warehouse_location_id`
+- `branch_id`
+- `customer_main_account_number`
+
+**Important helper functions**
+- `extract_runtime_context()`
+- `extract_runtime_context_from_html()`
+- `get_tile_pricing()`
+
+**Stability**
+- stable but dependent on Ferguson markup and endpoint behavior
 
 ---
 
-### Layer 4: Authentication / Session Establishment Layer
-This is the least stable and the most open to redesign.
+### Layer 5: Debugging and Diagnostics
 
-#### Current production baseline
-- open Chrome with a dedicated persistent profile
-- reuse an existing Ferguson session if present
-- if not authenticated, let the user log in manually
-- verify the session is truly authenticated
-- copy browser cookies into a `requests.Session`
+**Responsibilities**
+- save enough information to diagnose misses and failures
+- avoid overwhelming the working folder with loose debug files
+- preserve a lightweight support trail for login, parsing, and runtime context issues
 
-#### Stability
-**Intentionally flexible.** This layer may be rewritten substantially in the future.
+**Current behavior**
+- debug output goes into `debugging`
+- saved file types include `.json`, `.html`, and `.png`
+- only a limited number of miss pages are saved per run
+- startup cleanup clears the contents of `debugging` without deleting the folder itself
 
-#### Important rule
-A future agent may redesign authentication aggressively, but any replacement must preserve or revalidate the downstream lookup and Excel behavior.
+**Why the cleanup works this way**
+Deleting the entire folder caused Windows / OneDrive permission errors when files were open, syncing, or locked. Content-only cleanup is the current safe baseline.
 
----
+**Stability**
+- moderately stable
+- can be improved, but should remain lightweight and useful
 
-### Layer 5: Debugging and Diagnostics Layer
-This is the safety net for future maintenance.
+## Current End-to-End Flow
 
-#### Responsibilities
-- save lightweight debug artifacts for misses and major failures
-- capture enough context to understand why a row failed
-- avoid excessive logging on successful runs
+1. start script from working folder
+2. open workbook
+3. gather model numbers from worksheet
+4. launch Chrome with dedicated profile
+5. verify existing authenticated Ferguson session or prompt for manual login
+6. transfer cookies into `requests.Session`
+7. extract runtime pricing context
+8. sanitize model number
+9. search Ferguson results page
+10. parse Ferguson item number from search HTML
+11. request price from `Search-GetTilePricing`
+12. write item number and price back to workbook
+13. autosave periodically
+14. save final workbook
+15. close browser
 
-#### Stability
-**Moderately stable.** Keep enough to diagnose issues without clutter.
+## Confirmed Historical Discoveries
 
-## Current Working Flow
-1. Start the script from its local working folder.
-2. Launch Chrome with a dedicated persistent profile.
-3. Check whether Ferguson is already authenticated.
-4. If not, prompt for manual login.
-5. Verify authenticated state using page-state signals, not URL alone.
-6. Transfer browser cookies into a `requests.Session`.
-7. Read rows from the workbook.
-8. Sanitize each model number.
-9. Request the Ferguson search page for that model.
-10. Parse the HTML for the Ferguson item number.
-11. Retrieve price using `Search-GetTilePricing` and runtime account context.
-12. Write results into the workbook.
-13. Autosave periodically.
-14. Save final output and close the browser.
-
-## Why the Architecture Looks This Way
-The project arrived at this structure through repeated trial and error.
-
-### Earlier ideas that failed or were deprioritized
-- visible site-search automation
-- Selenium-only login automation
-- autosuggest as the main lookup source
-- URL-only login validation
-- stealth-style anti-detection flags as the main solution
-
-### What was learned
-- the login problem and the lookup problem are separate
-- authentication must be validated by session state, not by visual progress alone
-- item lookup and pricing are separate Ferguson workflows
-- the search page is a dependable source of item-number mapping
-- the price endpoint becomes usable once the Ferguson item number and runtime account context are known
+- visible site-search automation was not the reliable core solution
+- autosuggest was not the authoritative item-mapping source
+- the real Ferguson search results page contained usable item-number mapping
+- a storefront can look partially advanced while still behaving like guest state
+- login validation must be based on authenticated page state, not URL alone
+- pricing became reliable only after the Ferguson item number and runtime account context were known
+- model-number sanitization is required for stable searching
 
 ## Current Canonical Assets
+
 - **Canonical script:** `Ferguson Item Number Scraper.py`
-- **Canonical workbook:** `Ferguson Item Scraper Template.xlsx`
-- **Canonical sheet:** `Scraper data`
-- **Canonical working folder:**
-  `C:\Users\rparker\OneDrive - HillGrp.com\HMS Sales - Documents\Estimating Templates\Data\Automations\Ferguson PVF Item Number Scraper`
+- **Canonical workbook:** `Ferguson Item Number Scraper Template.xlsx`
+- **Canonical worksheet:** `Scraper Data`
+- **Dedicated profile folder:** `Ferguson Item Number Scraper Profile`
+- **Debug folder:** `debugging`
 
-## Runtime Dependencies
-- Python
-- `selenium`
-- `requests`
-- `openpyxl`
-- local Chrome installation compatible with Selenium WebDriver
+## Safe vs Risky Changes
 
-## Data Flow Summary
-### Inputs
-- Excel workbook rows containing manufacturer model numbers
-- authenticated Ferguson browser session
-- runtime account context from the logged-in page
+### Safer changes
+- documentation updates
+- debug-file organization
+- small parser hardening changes
+- improved warnings and diagnostics
+- retry tuning
 
-### Outputs
-- Ferguson proprietary item number written back into Excel
-- Ferguson price written back into Excel when available
-- limited debug files on misses or major failures
+### Higher-risk changes
+- changing workbook column contract
+- rewriting authentication
+- changing the search source of truth
+- changing pricing context extraction
+- broad refactors without sample validation
 
-## Architecture Boundaries for Future Agents
+## Required Revalidation After Login Changes
 
-### Safe to change aggressively
-- authentication and session-establishment strategy
-- structured logging format
-- config externalization
-- retry behavior
-- browser automation library choice for login
+Any authentication rewrite must revalidate all of the following:
 
-### Change cautiously
-- model-number sanitization
-- HTML parsing logic for item-number extraction
-- runtime context extraction for pricing
-- output workbook naming strategy
-
-### Do not change casually
-- workbook/sheet contract without coordinated update
-- separation between item lookup and pricing lookup
-- the principle of validating authentication before lookup
-- the principle of using the real search page as the validated item-number source unless a better source is proven
-
-## Future Architecture Directions
-
-### Direction 1: Automated login
-Potential future replacements for the current login layer:
-- more reliable Selenium login
-- Playwright-based login
-- persistent cookie/session serialization
-- profile seeding
-- enterprise-safe unattended login
-- server-safe headless session reuse
-
-### Direction 2: Config externalization
-Potentially move these out of the main script:
-- workbook name
-- sheet name
-- columns
-- save interval
-- output filename
-- debug retention policy
-
-### Direction 3: Database integration
-Use Ferguson item numbers and prices as keys and values in the future master pricing database for plumbing estimating.
-
-## Architectural Regression Standard
-Any major rewrite should still be able to prove the following:
-- a known valid model number can be processed successfully
-- the correct Ferguson item number is extracted
-- the correct price is retrieved when context is available
-- the workbook receives the correct values in the expected places
-
+1. authenticated session is truly established
+2. Ferguson item numbers are still extracted correctly
+3. prices are still returned correctly
+4. Excel writes still land in the intended workbook/sheet/columns

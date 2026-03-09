@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets
+credentials.txt
+.env
+.env.*
+
+# Browser/session data
+chrome_profile/
+Ferguson Item Number Scraper Profile/
+
+# Debug artifacts
+debug/
+*.log
+debug_*.html
+debug_*.png
+debug_*.json
+debug_*.txt
+
+# Output files
+output/
+~$*.xlsx
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

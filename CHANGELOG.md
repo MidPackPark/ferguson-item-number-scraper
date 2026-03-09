@@ -1,3 +1,6 @@
+## Working notes
+Repository initialized and baseline v1.0 created on GitHub.
+
 # Changelog
 
 All meaningful project changes should be recorded here. This file is intended to help future agents and developers understand what changed, why it changed, and what was learned.
